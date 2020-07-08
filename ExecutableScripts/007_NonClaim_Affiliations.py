@@ -1,0 +1,90 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# #### Insert non-claims based affiliations w/ scores (Hospitals and PGs)
+
+
+import pandas as pd 
+from google.cloud import bigquery
+
+
+
+bq_conn = bigquery.Client()
+
+
+
+
+sql_insert = """
+INSERT INTO DS_WORK.PHYSICIAN_ORG_AFFILIATIONS (PHYSICIAN_NPI, DEFHC_ID, FIRM_TYPE, SCORE_BUCKET, OTHER_SOURCE_FLAG)
+SELECT A.NPI
+    ,  A.HOSPITAL_ID 
+    ,  A.FIRM_TYPE
+    ,  CASE WHEN C.PHYSICIAN_NPI IS NULL THEN 7 - A.AFFILIATION_RANK ELSE 2 END AS SCORE_BUCKET 
+    ,  1 AS OTHER_SOURCE_FLAG
+FROM   (
+        SELECT * FROM DS_WORK.CURRENT_PHYSICIAN_HOSPITAL_AFFILIATIONS
+       ) A 
+LEFT   JOIN DS_WORK.PHYSICIAN_ORG_AFFILIATIONS B 
+ON     A.NPI = B.PHYSICIAN_NPI 
+AND    A.HOSPITAL_ID = B.DEFHC_ID
+LEFT   JOIN 
+       ( 
+        SELECT DISTINCT PHYSICIAN_NPI FROM DS_WORK.PHYSICIAN_ORG_AFFILIATIONS WHERE FIRM_TYPE = 'Hospital' 
+       ) C 
+ON     A.NPI = C.PHYSICIAN_NPI 
+WHERE  B.PHYSICIAN_NPI IS NULL 
+UNION ALL 
+SELECT A.NPI
+    ,  A.HOSPITAL_ID 
+    ,  A.FIRM_TYPE
+    ,  6 AS SCORE_BUCKET
+    ,  1 AS OTHER_SOURCE_FLAG 
+FROM   (
+        SELECT * FROM DS_WORK.CURRENT_PHYSICIAN_PG_AFFILIATIONS
+       ) A 
+LEFT   JOIN DS_WORK.PHYSICIAN_ORG_AFFILIATIONS B 
+ON     A.NPI = B.PHYSICIAN_NPI 
+AND    A.HOSPITAL_ID = B.DEFHC_ID
+WHERE  B.PHYSICIAN_NPI IS NULL 
+"""
+
+bq_conn.query(sql_insert).result()
+
+
+
+
+sql_update = """UPDATE DS_WORK.PHYSICIAN_ORG_AFFILIATIONS  
+SET SCORE_BUCKET = CASE WHEN FIRM_TYPE = 'Physician Group' AND SCORE_BUCKET < 6 THEN 6 WHEN SCORE_BUCKET = 10 THEN 10 ELSE SCORE_BUCKET + 1 END 
+WHERE IFNULL(COMM_CLAIMS,0) + IFNULL(MCR_CLAIMS,0) > 0 
+AND OTHER_SOURCE_FLAG = 1 """
+
+bq_conn.query(sql_update).result()
+
+
+
+
+
+
+# Flag affiliations for inclusion
+
+
+
+sql_inclusion_flag = """
+CREATE OR REPLACE TABLE DS_WORK.PHYSICIAN_ORG_AFFILIATIONS 
+AS 
+SELECT *
+    ,  CASE WHEN (  SCORE_BUCKET > 1 
+                    AND (PCT_CLAIMS_MCR > 0.05 OR PCT_CLAIMS_COMM > 0.05 OR FIRM_TYPE_RANK = 1) 
+                    AND MONTHS > 1 
+                    AND IFNULL(PATIENTS_COMM,0)+IFNULL(PATIENTS_MCR,0) > 2 
+                 ) 
+                 OR SCORE_BUCKET >= 6
+                 OR OTHER_SOURCE_FLAG = 1 
+            THEN 1 ELSE 0 END AS INCLUDE_FLAG 
+FROM   DS_WORK.PHYSICIAN_ORG_AFFILIATIONS 
+"""
+
+bq_conn.query(sql_inclusion_flag).result() 
+
+
+
